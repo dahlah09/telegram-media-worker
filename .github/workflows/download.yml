@@ -1,0 +1,122 @@
+name: media-download
+
+run-name: media-${{ inputs.job_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: "Source media URL"
+        required: true
+        type: string
+      chat_id:
+        description: "Telegram chat ID"
+        required: true
+        type: string
+      reply_to_message_id:
+        description: "Telegram message ID"
+        required: true
+        type: string
+      job_id:
+        description: "Internal job ID"
+        required: true
+        type: string
+
+concurrency:
+  group: telegram-media-worker
+  cancel-in-progress: false
+
+jobs:
+  download-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Install yt-dlp
+        run: python -m pip install --disable-pip-version-check --upgrade yt-dlp
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Download media
+        id: download
+        env:
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          yt-dlp \
+            --no-playlist \
+            --max-filesize 500M \
+            --socket-timeout 30 \
+            --retries 3 \
+            --fragment-retries 3 \
+            --restrict-filenames \
+            --merge-output-format mp4 \
+            -o 'work/%(id)s.%(ext)s' \
+            "$SOURCE_URL"
+
+      - name: Validate size
+        env:
+          MAX_BYTES: "524288000"
+        run: |
+          set -euo pipefail
+          FILE="$(find work -maxdepth 1 -type f | head -n 1)"
+          test -n "$FILE"
+          SIZE="$(stat -c%s "$FILE")"
+          echo "Media size: $SIZE bytes"
+          test "$SIZE" -le "$MAX_BYTES"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to Telegram and create result
+        id: upload
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          REPLY_TO: ${{ inputs.reply_to_message_id }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: |
+          set -euo pipefail
+          FILE="$(find work -maxdepth 1 -type f | head -n 1)"
+          mkdir -p result
+
+          RESPONSE="$(
+            curl --fail-with-body \
+              --max-time 900 \
+              -X POST \
+              "https://api.telegram.org/bot${BOT_TOKEN}/sendVideo" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "reply_to_message_id=${REPLY_TO}" \
+              -F "video=@${FILE}" \
+              -F "supports_streaming=true"
+          )"
+
+          RESPONSE="$RESPONSE" JOB_ID="$JOB_ID" python - > result/result.json <<'PY'
+import json, os
+data = json.loads(os.environ["RESPONSE"])
+if data.get("ok") and data.get("result"):
+    v = data["result"].get("video") or {}
+    print(json.dumps({
+        "ok": True,
+        "job_id": os.environ["JOB_ID"],
+        "file_id": v.get("file_id"),
+        "file_unique_id": v.get("file_unique_id"),
+        "message_id": data["result"].get("message_id")
+    }))
+else:
+    print(json.dumps({"ok": False, "error": data.get("description", "Telegram API failure")}))
+PY
+
+      - name: Upload tiny result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result
+          path: result/result.json
+          retention-days: 1
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf work result
