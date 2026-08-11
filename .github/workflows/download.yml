@@ -56,16 +56,18 @@ jobs:
             -p 4416:4416 \
             brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
 
+          echo "Waiting for bgutil provider..."
+
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:4416/ >/dev/null 2>&1; then
-              echo "bgutil provider is ready"
+            if (echo > /dev/tcp/127.0.0.1/4416) >/dev/null 2>&1; then
+              echo "bgutil provider is listening on port 4416"
               exit 0
             fi
 
             sleep 1
           done
 
-          echo "bgutil provider failed to start"
+          echo "bgutil provider failed to listen on port 4416"
           docker logs bgutil-provider
           exit 1
 
