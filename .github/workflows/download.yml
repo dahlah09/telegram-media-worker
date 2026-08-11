@@ -37,11 +37,13 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Install yt-dlp
+      - name: Install yt-dlp and PO Token provider
         run: |
           python -m pip install \
             --disable-pip-version-check \
-            --upgrade yt-dlp
+            --upgrade \
+            yt-dlp \
+            bgutil-ytdlp-pot-provider
 
       - name: Install ffmpeg
         run: |
