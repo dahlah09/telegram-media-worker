@@ -37,49 +37,24 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Install yt-dlp
+      - name: Install yt-dlp and PO Token plugin
         run: |
           python -m pip install \
             --disable-pip-version-check \
             --upgrade \
-            yt-dlp
-
-      - name: Install bgutil PO Token provider
-        run: |
-          git clone \
-            --single-branch \
-            --branch 1.3.1 \
-            https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
+            yt-dlp \
             bgutil-ytdlp-pot-provider
 
-          cd bgutil-ytdlp-pot-provider/server
-
-          deno install \
-            --allow-scripts=npm:canvas \
-            --frozen
-
-      - name: Install bgutil yt-dlp plugin
-        run: |
-          python -m pip install \
-            --disable-pip-version-check \
-            --upgrade \
-            bgutil-ytdlp-pot-provider
-
-      - name: Start bgutil PO Token server
+      - name: Start bgutil PO Token provider
         run: |
           set -euo pipefail
 
-          cd bgutil-ytdlp-pot-provider/server
-
-          nohup deno run \
-            --allow-env \
-            --allow-net \
-            --allow-ffi=. \
-            --allow-read=. \
-            ../src/main.ts \
-            > "$GITHUB_WORKSPACE/bgutil.log" 2>&1 &
-
-          echo $! > "$GITHUB_WORKSPACE/bgutil.pid"
+          docker run \
+            --name bgutil-provider \
+            -d \
+            --init \
+            -p 4416:4416 \
+            brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
 
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:4416/ >/dev/null 2>&1; then
@@ -91,7 +66,7 @@ jobs:
           done
 
           echo "bgutil provider failed to start"
-          cat "$GITHUB_WORKSPACE/bgutil.log"
+          docker logs bgutil-provider
           exit 1
 
       - name: Install ffmpeg
@@ -99,18 +74,32 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
 
-      - name: Verify yt-dlp providers
+      - name: Verify yt-dlp PO Token provider
         env:
           SOURCE_URL: ${{ inputs.source_url }}
         run: |
-          yt-dlp -v --skip-download "$SOURCE_URL" 2>&1 | tee yt-dlp-debug.log || true
+          set -o pipefail
+
+          yt-dlp \
+            -v \
+            --skip-download \
+            --js-runtimes deno \
+            "$SOURCE_URL" \
+            2>&1 | tee yt-dlp-debug.log || true
+
+          echo "===== PO TOKEN PROVIDERS ====="
 
           grep -E \
-            "PO Token Providers|bgutil:http" \
+            "PO Token Providers|bgutil" \
             yt-dlp-debug.log || true
 
-          echo "===== bgutil log ====="
-          cat bgutil.log || true
+          echo "===== BGUTIL CONTAINER ====="
+
+          docker ps --filter name=bgutil-provider
+
+          echo "===== BGUTIL LOG ====="
+
+          docker logs bgutil-provider || true
 
       - name: Download media
         env:
@@ -137,9 +126,11 @@ jobs:
           set -euo pipefail
 
           FILE="$(find work -maxdepth 1 -type f | head -n 1)"
+
           test -n "$FILE"
 
           SIZE="$(stat -c%s "$FILE")"
+
           echo "Media size: $SIZE bytes"
 
           test "$SIZE" -le 52428800
@@ -154,6 +145,7 @@ jobs:
           set -euo pipefail
 
           FILE="$(find work -maxdepth 1 -type f | head -n 1)"
+
           mkdir -p result
 
           curl \
@@ -187,6 +179,4 @@ jobs:
         if: always()
         run: |
           rm -rf work result response.json
-          if [ -f bgutil.pid ]; then
-            kill "$(cat bgutil.pid)" 2>/dev/null || true
-          fi
+          docker rm -f bgutil-provider 2>/dev/null || true
